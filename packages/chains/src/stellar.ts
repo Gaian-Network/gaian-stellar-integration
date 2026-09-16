@@ -11,6 +11,10 @@ import type {
 
 const USDC_DECIMALS = 7;
 
+// Disambiguates orders on Stellar's shared deposit address (no per-order
+// address exists). Last 12 hex chars of the orderId (final UUID v4 segment).
+export const stellarMemoFromOrderId = (orderId: string): string => orderId.slice(-12);
+
 const buildServer = (): StellarSdk.Horizon.Server =>
   new StellarSdk.Horizon.Server(env.STELLAR_HORIZON_URL);
 
@@ -52,19 +56,20 @@ export const stellarAdapter: ChainAdapter = {
       throw new Error(`failed to load Stellar account: ${msg}`);
     }
 
-    const tx = new StellarSdk.TransactionBuilder(account, {
+    const txBuilder = new StellarSdk.TransactionBuilder(account, {
       fee: StellarSdk.BASE_FEE,
       networkPassphrase: env.STELLAR_NETWORK_PASSPHRASE,
-    })
-      .addOperation(
-        StellarSdk.Operation.payment({
-          destination: input.toAddress,
-          asset: usdcAsset,
-          amount: input.amount,
-        }),
-      )
-      .setTimeout(300)
-      .build();
+    }).addOperation(
+      StellarSdk.Operation.payment({
+        destination: input.toAddress,
+        asset: usdcAsset,
+        amount: input.amount,
+      }),
+    );
+    if (input.memo !== undefined) {
+      txBuilder.addMemo(StellarSdk.Memo.text(input.memo));
+    }
+    const tx = txBuilder.setTimeout(300).build();
 
     const encodedTransaction = tx.toXDR();
 
@@ -250,6 +255,47 @@ export const stellarAdapter: ChainAdapter = {
         chain: CHAIN_IDS.STELLAR,
         txHash: input.txHash,
         reason: `amount ${observed.amount.toString()} < expected ${minAmount.toString()}`,
+      };
+    }
+
+    // Only enforced when the caller passes one, so orders without a memo on-chain still verify.
+    if (input.memo !== undefined) {
+      const matchesMemo = txRecord.memo_type === 'text' && txRecord.memo === input.memo;
+      if (!matchesMemo) {
+        logger.warn(
+          {
+            op: 'stellar.verify',
+            txHash: input.txHash,
+            expectedMemo: input.memo,
+            observedMemoType: txRecord.memo_type,
+            observedMemo: txRecord.memo,
+          },
+          'stellar.verify.memo_mismatch',
+        );
+        return {
+          ok: false,
+          chain: CHAIN_IDS.STELLAR,
+          txHash: input.txHash,
+          reason: 'memo does not match expected order memo',
+        };
+      }
+    }
+
+    if (input.expectedFromAddress && observed.from !== input.expectedFromAddress) {
+      logger.warn(
+        {
+          op: 'stellar.verify',
+          txHash: input.txHash,
+          observedFrom: observed.from,
+          expectedFromAddress: input.expectedFromAddress,
+        },
+        'stellar.verify.from_mismatch',
+      );
+      return {
+        ok: false,
+        chain: CHAIN_IDS.STELLAR,
+        txHash: input.txHash,
+        reason: `from ${observed.from} != expected ${input.expectedFromAddress}`,
       };
     }
 

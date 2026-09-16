@@ -96,6 +96,7 @@ export const v2PlaceOrderResponseSchema = z.object({
   settlementCurrency: z.string(),
   encodedTransaction: z.string(),
   expiresAt: z.string(),
+  memo: z.string().optional(),
 });
 
 export type V2PlaceOrderResponse = z.infer<typeof v2PlaceOrderResponseSchema>;

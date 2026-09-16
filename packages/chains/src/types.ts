@@ -6,6 +6,7 @@ export interface EncodeTransferInput {
   readonly fromAddress: string;
   readonly toAddress: string;
   readonly amount: string;
+  readonly memo?: string;
 }
 
 export interface EncodeTransferResult {
@@ -24,6 +25,7 @@ export interface VerifyTransferInput {
   readonly expectedToAddress: string;
   readonly expectedFromAddress?: string;
   readonly minAmountBaseUnits: string;
+  readonly memo?: string;
 }
 
 export type VerifyTransferResult =
