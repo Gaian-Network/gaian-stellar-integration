@@ -1,4 +1,4 @@
-import { getChainAdapter } from '@gaian-stellar-integration/chains';
+import { getChainAdapter, stellarMemoFromOrderId } from '@gaian-stellar-integration/chains';
 import {
   AuthenticationError,
   AuthorizationError,
@@ -88,12 +88,14 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
       await requireKyc(quote);
 
       const adapter = getChainAdapter(quote.chain);
+      const memo = stellarMemoFromOrderId(quote.orderId);
       const encoded = await adapter.encode({
         chain: quote.chain,
         token: quote.token,
         fromAddress: quote.fromAddress,
         toAddress: quote.depositAddress,
         amount: quote.cryptoAmount,
+        memo,
       });
 
       await orders.createOrder({
@@ -134,6 +136,7 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         settlementCurrency: quote.token,
         encodedTransaction: encoded.encodedTransaction,
         expiresAt: quote.expiresAt,
+        memo,
       };
       return await reply.ok(response);
     },
@@ -147,7 +150,7 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         summary: 'Verify Stellar on-chain transaction',
         description:
           'Submit the broadcasted Stellar transaction hash. The adapter queries Horizon to verify ' +
-          'the USDC transfer (amount, addresses). On success the order advances to `processing` ' +
+          'the USDC transfer (amount, addresses, memo). On success the order advances to `processing` ' +
           'and payout is dispatched.',
         params: v2IdParamsSchema,
         body: v2VerifyRequestSchema,
@@ -192,6 +195,7 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         expectedToAddress: quote.depositAddress,
         expectedFromAddress: quote.fromAddress,
         minAmountBaseUnits: quote.amountBaseUnits,
+        memo: stellarMemoFromOrderId(id),
       });
 
       if (!verification.ok) {
