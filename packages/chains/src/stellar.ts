@@ -11,8 +11,6 @@ import type {
 
 const USDC_DECIMALS = 7;
 
-// Disambiguates orders on Stellar's shared deposit address (no per-order
-// address exists). Last 12 hex chars of the orderId (final UUID v4 segment).
 export const stellarMemoFromOrderId = (orderId: string): string => orderId.slice(-12);
 
 const buildServer = (): StellarSdk.Horizon.Server =>
@@ -258,7 +256,6 @@ export const stellarAdapter: ChainAdapter = {
       };
     }
 
-    // Only enforced when the caller passes one, so orders without a memo on-chain still verify.
     if (input.memo !== undefined) {
       const matchesMemo = txRecord.memo_type === 'text' && txRecord.memo === input.memo;
       if (!matchesMemo) {
