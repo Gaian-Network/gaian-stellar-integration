@@ -21,6 +21,7 @@
     "@gaian-stellar-integration/config": "workspace:*",
     "@gaian-stellar-integration/core": "workspace:*",
     "@gaian-stellar-integration/db": "workspace:*",
+    "axios": "^1.7.9",
     "decimal.js": "^10.6.0",
     "drizzle-orm": "^0.36.0",
     "fastify": "^5.1.0",

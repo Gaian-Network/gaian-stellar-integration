@@ -90,6 +90,14 @@ export const env = cleanEnv(process.env, {
 
   DEPOSIT_ADDRESS_STELLAR_USDC: str({ default: '' }),
 
+  // gaian-webhook: central webhook-dispatch service. This API POSTs every order
+  // status transition to its /internal/events; that service stores tenant
+  // endpoints, signs deliveries (HMAC) and retries to the tenant.
+  GAIAN_WEBHOOK_ENABLED: bool({ default: false }),
+  GAIAN_WEBHOOK_URL: str({ default: '' }),
+  GAIAN_WEBHOOK_TIMEOUT_MS: num({ default: 5_000 }),
+  GAIAN_WEBHOOK_RETRY_ATTEMPTS: num({ default: 2 }),
+
   STELLAR_HORIZON_URL: url({ default: 'https://horizon.stellar.org' }),
   STELLAR_NETWORK_PASSPHRASE: str({
     default: 'Public Global Stellar Network ; September 2015',

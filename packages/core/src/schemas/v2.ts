@@ -117,3 +117,19 @@ export const v2VerifyResponseSchema = z.object({
 
 export type V2VerifyResponse = z.infer<typeof v2VerifyResponseSchema>;
 
+export const v2StatusResponseSchema = z.object({
+  orderId: z.string(),
+  status: z.number().int(),
+  statusLabel: z.string(),
+  chainId: z.number().int(),
+  depositAddress: z.string().optional(),
+  transactionHash: z.string().optional(),
+  fiatAmount: z.number(),
+  fiatCurrency: z.string(),
+  settlementAmount: z.string(),
+  settlementCurrency: z.string(),
+  exchangeRate: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type V2StatusResponse = z.infer<typeof v2StatusResponseSchema>;

@@ -16,9 +16,11 @@ import {
   v2OkEnvelope,
   v2PlaceOrderRequestSchema,
   v2PlaceOrderResponseSchema,
+  v2StatusResponseSchema,
   v2VerifyRequestSchema,
   v2VerifyResponseSchema,
   type V2PlaceOrderResponse,
+  type V2StatusResponse,
   type V2VerifyResponse,
 } from '@gaian-stellar-integration/core';
 import { z } from 'zod';
@@ -233,6 +235,50 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
       });
 
       return await reply.ok(verifyResponse('verified', 'verified and dispatched'));
+    },
+  );
+
+  app.get(
+    '/orders/:id',
+    {
+      schema: {
+        tags: ['Orders'],
+        summary: 'Fetch order status',
+        description:
+          'Payment status for partner polling. Returns the order row joined with its ' +
+          'on-chain transfer record (deposit address, transaction hash). Every status ' +
+          'transition is also pushed to the tenant webhook endpoint.',
+        params: v2IdParamsSchema,
+        response: { 200: v2OkEnvelope(v2StatusResponseSchema), ...envelopeErrors },
+        security: [{ tenantHeader: [] }],
+      },
+    },
+    async (req, reply) => {
+      await app.requireTenantHeader(req);
+      const tenant = req.tenant;
+      if (!tenant) throw new AuthenticationError('Tenant authentication required');
+      const { id } = req.params as { id: string };
+
+      // Tenant-scoped lookup: a tenant can only read its own orders.
+      const row = await orders.findStatusByOrderIdAndTenant(id, tenant.id);
+      if (!row) throw new NotFoundError(`Order ${id}`);
+
+      const response: V2StatusResponse = {
+        orderId: row.orderId,
+        status: v2OrderStatusCode(row.status),
+        statusLabel: row.status,
+        chainId: chainIdToNumeric(CHAIN_IDS.STELLAR),
+        ...(row.depositAddress ? { depositAddress: row.depositAddress } : {}),
+        ...(row.transactionHash ? { transactionHash: row.transactionHash } : {}),
+        fiatAmount: Number(row.fiatAmount),
+        fiatCurrency: row.fiatCurrency,
+        settlementAmount: String(row.cryptoAmount),
+        settlementCurrency: row.cryptoCurrency,
+        exchangeRate: String(row.exchangeRate ?? 0),
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      };
+      return await reply.ok(response);
     },
   );
 };
