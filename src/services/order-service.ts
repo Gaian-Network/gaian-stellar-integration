@@ -15,6 +15,8 @@ import {
 } from '@gaian-stellar-integration/db';
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 
+import { publishOrderStatusEvent } from './webhook-event-publisher.js';
+
 import type { CryptoOrder } from '@gaian-stellar-integration/core';
 
 export interface OrderInsert {
@@ -142,6 +144,33 @@ export class OrderService {
     return rows[0] ?? null;
   }
 
+  // Order joined with its crypto transfer, for the partner-facing status API.
+  async findStatusByOrderIdAndTenant(
+    orderId: string,
+    tenantId: number,
+  ): Promise<
+    | (OrderRow & { readonly depositAddress: string | null; readonly transactionHash: string | null })
+    | null
+  > {
+    const rows = await this.db
+      .select({
+        order: orders,
+        depositAddress: cryptoTransfers.toAddress,
+        transactionHash: cryptoTransfers.transactionHash,
+      })
+      .from(orders)
+      .leftJoin(cryptoTransfers, eq(cryptoTransfers.orderId, orders.id))
+      .where(and(eq(orders.orderId, orderId), eq(orders.tenantId, tenantId)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      ...row.order,
+      depositAddress: row.depositAddress ?? null,
+      transactionHash: row.transactionHash ?? null,
+    };
+  }
+
   async requireByOrderId(orderId: string): Promise<OrderRow> {
     const found = await this.findByOrderId(orderId);
     if (!found) throw new NotFoundError(`Order ${orderId}`);
@@ -151,6 +180,7 @@ export class OrderService {
   async updateStatus(orderId: string, nextStatus: string, event = 'status updated'): Promise<void> {
     let didTransition = false;
     let fromStatus: string | undefined;
+    let transitionId: number | undefined;
     await this.db.transaction(async (tx) => {
       const rows = await tx
         .select({ id: orders.id, current: orders.status })
@@ -171,17 +201,21 @@ export class OrderService {
         .update(orders)
         .set({ status: nextStatus, updatedAt: new Date() })
         .where(eq(orders.id, current.id));
-      await tx.insert(orderStatusHistory).values({
-        orderId: current.id,
-        fromStatus: current.current,
-        toStatus: nextStatus,
-        triggeredBy: 'system',
-        // Legacy app_order_status_history.event is varchar(50) in prod (the
-        // drizzle mirror says 255 but the pre-existing table wins). Truncate so
-        // a long event (e.g. 'verify failed: <reason>') can't 22001 the tx.
-        event: event.slice(0, 50),
-      });
+      const history = await tx
+        .insert(orderStatusHistory)
+        .values({
+          orderId: current.id,
+          fromStatus: current.current,
+          toStatus: nextStatus,
+          triggeredBy: 'system',
+          // Legacy app_order_status_history.event is varchar(50) in prod (the
+          // drizzle mirror says 255 but the pre-existing table wins). Truncate so
+          // a long event (e.g. 'verify failed: <reason>') can't 22001 the tx.
+          event: event.slice(0, 50),
+        })
+        .returning({ id: orderStatusHistory.id });
       fromStatus = current.current;
+      transitionId = history[0]?.id;
       didTransition = true;
     });
 
@@ -192,6 +226,12 @@ export class OrderService {
         { audit: 'order.status', orderId, fromStatus, toStatus: nextStatus, event, triggeredBy: 'system' },
         'audit.order.status',
       );
+      // Tell the tenant. Fire-and-forget: the status is already committed, and
+      // a slow or failing webhook hand-off must not delay the API response.
+      if (transitionId !== undefined) {
+        const fresh = await this.findByOrderId(orderId);
+        if (fresh) void publishOrderStatusEvent(fresh, { id: transitionId, status: nextStatus });
+      }
     }
 
   }

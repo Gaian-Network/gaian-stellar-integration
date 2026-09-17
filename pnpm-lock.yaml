@@ -29,6 +29,9 @@ importers:
       '@gaian-stellar-integration/db':
         specifier: workspace:*
         version: link:packages/db
+      axios:
+        specifier: ^1.7.9
+        version: 1.15.0
       decimal.js:
         specifier: ^10.6.0
         version: 10.6.0
