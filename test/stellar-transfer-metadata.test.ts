@@ -29,7 +29,7 @@ const pathPayment = {
 } as const;
 
 describe('stellarTransferMetadata', () => {
-  it('U-D1-08 stores the source asset, send max and time bound of an XLM order', () => {
+  it('stores the source asset, send max and time bound of an XLM order', () => {
     assert.deepEqual(
       stellarTransferMetadata(encoded({ txHash: TX_HASH, maxTime: 1_800_000_000, pathPayment })),
       {
@@ -53,12 +53,12 @@ describe('stellarTransferMetadata', () => {
 });
 
 describe('stellarMaxTimeFromMetadata', () => {
-  it('U-R-01 reads the time bound written at order time, next to a sandbox block', () => {
+  it('reads the time bound written at order time, next to a sandbox block', () => {
     const meta = { sandbox: { outcome: 'fail' }, stellar: { maxTime: 1_800_000_000 } };
     assert.equal(stellarMaxTimeFromMetadata(meta), 1_800_000_000);
   });
 
-  it('U-D2-06 rows from before time bounds answer undefined, so verify stays retryable', () => {
+  it('rows from before time bounds answer undefined, so verify stays retryable', () => {
     assert.equal(stellarMaxTimeFromMetadata(null), undefined);
     assert.equal(stellarMaxTimeFromMetadata({ sandbox: { outcome: 'fail' } }), undefined);
     assert.equal(stellarMaxTimeFromMetadata({ stellar: {} }), undefined);
@@ -72,7 +72,7 @@ describe('stellarMaxTimeFromMetadata', () => {
 });
 
 describe('stellarBuiltTxHashFromMetadata', () => {
-  it('U-D2-08 reads the built tx hash so verify can expire only that tx', () => {
+  it('reads the built tx hash so verify can expire only that tx', () => {
     assert.equal(stellarBuiltTxHashFromMetadata({ stellar: { txHash: TX_HASH } }), TX_HASH);
   });
 

@@ -153,17 +153,17 @@ const baseVerify = {
 } as const;
 
 describe('stellarSendMaxWithSlippage', () => {
-  it('U-D1-03 adds exactly 1% to the quoted source amount', () => {
+  it('adds exactly 1% to the quoted source amount', () => {
     assert.equal(stellarSendMaxWithSlippage('15.0000000'), '15.1500000');
   });
 
-  it('U-D1-04 rounds a fractional stroop up, never down', () => {
+  it('rounds a fractional stroop up, never down', () => {
     assert.equal(stellarSendMaxWithSlippage('1.0000001'), '1.0100002');
   });
 });
 
 describe('stellarAdapter.encode', () => {
-  it('U-D1-06 plain USDC payment is unchanged: one payment op, USDC, amount, memo', async () => {
+  it('plain USDC payment is unchanged: one payment op, USDC, amount, memo', async () => {
     fakeHorizon({});
     const res = await stellarAdapter.encode({ ...baseEncode });
     const tx = decode(res.encodedTransaction);
@@ -178,7 +178,7 @@ describe('stellarAdapter.encode', () => {
     assert.equal(res.stellar?.pathPayment, undefined);
   });
 
-  it('U-D2-01 the plain payment carries the order expiry as its max time, min time 0', async () => {
+  it('the plain payment carries the order expiry as its max time, min time 0', async () => {
     fakeHorizon({});
     const res = await stellarAdapter.encode({ ...baseEncode });
     const tx = decode(res.encodedTransaction);
@@ -187,7 +187,7 @@ describe('stellarAdapter.encode', () => {
     assert.equal(res.stellar?.maxTime, EXPIRES_AT_SEC);
   });
 
-  it('U-D1-01 XLM order builds one path payment: XLM in, exact USDC out to the deposit address', async () => {
+  it('XLM order builds one path payment: XLM in, exact USDC out to the deposit address', async () => {
     fakeHorizon({ paths: [{ source_amount: '15.0000000', path: [] }] });
     const res = await stellarAdapter.encode({ ...baseEncode, sourceAsset: 'XLM' });
     const tx = decode(res.encodedTransaction);
@@ -202,7 +202,7 @@ describe('stellarAdapter.encode', () => {
     assert.equal(tx.memo.value?.toString(), MEMO);
   });
 
-  it('U-D1-10 the live path search asks for XLM in and the exact USDC amount out', async () => {
+  it('the live path search asks for XLM in and the exact USDC amount out', async () => {
     fakeHorizon({ paths: [{ source_amount: '15.0000000', path: [] }] });
     await stellarAdapter.encode({ ...baseEncode, sourceAsset: 'XLM' });
     const [sources, dest, amount] = pathSearchArgs as [
@@ -216,7 +216,7 @@ describe('stellarAdapter.encode', () => {
     assert.equal(amount, '12.5');
   });
 
-  it('U-D2-13 encode reports the hash of the tx it built (unchanged by signing)', async () => {
+  it('encode reports the hash of the tx it built (unchanged by signing)', async () => {
     fakeHorizon({ paths: [{ source_amount: '15.0000000', path: [] }] });
     const res = await stellarAdapter.encode({ ...baseEncode, sourceAsset: 'XLM' });
     const tx = decode(res.encodedTransaction);
@@ -226,13 +226,13 @@ describe('stellarAdapter.encode', () => {
     assert.equal(tx.hash().toString('hex'), before);
   });
 
-  it('U-D1-02 XLM order still reports the USDC base units of the order', async () => {
+  it('XLM order still reports the USDC base units of the order', async () => {
     fakeHorizon({ paths: [{ source_amount: '15.0000000', path: [] }] });
     const res = await stellarAdapter.encode({ ...baseEncode, sourceAsset: 'XLM' });
     assert.equal(res.amountBaseUnits, '125000000');
   });
 
-  it('U-D2-02 the path payment carries the order expiry as its max time', async () => {
+  it('the path payment carries the order expiry as its max time', async () => {
     fakeHorizon({ paths: [{ source_amount: '15.0000000', path: [] }] });
     const res = await stellarAdapter.encode({ ...baseEncode, sourceAsset: 'XLM' });
     const tx = decode(res.encodedTransaction);
@@ -240,7 +240,7 @@ describe('stellarAdapter.encode', () => {
     assert.equal(tx.timeBounds?.maxTime, String(EXPIRES_AT_SEC));
   });
 
-  it('U-D1-09 picks the cheapest live path and uses its intermediate assets', async () => {
+  it('picks the cheapest live path and uses its intermediate assets', async () => {
     const hop = { asset_type: 'credit_alphanum4', asset_code: 'EURC', asset_issuer: OTHER_ISSUER };
     fakeHorizon({
       paths: [
@@ -256,7 +256,7 @@ describe('stellarAdapter.encode', () => {
     assert.ok(op.path[0]?.equals(new StellarSdk.Asset('EURC', OTHER_ISSUER)));
   });
 
-  it('U-D1-08 reports source asset, send max, quoted amount and path for storage and display', async () => {
+  it('reports source asset, send max, quoted amount and path for storage and display', async () => {
     fakeHorizon({ paths: [{ source_amount: '15.0000000', path: [] }] });
     const res = await stellarAdapter.encode({ ...baseEncode, sourceAsset: 'XLM' });
     assert.deepEqual(res.stellar?.pathPayment, {
@@ -268,7 +268,7 @@ describe('stellarAdapter.encode', () => {
     });
   });
 
-  it('U-D1-05 no XLM to USDC path: throws, nothing is built', async () => {
+  it('no XLM to USDC path: throws, nothing is built', async () => {
     fakeHorizon({ paths: [] });
     await assert.rejects(
       stellarAdapter.encode({ ...baseEncode, sourceAsset: 'XLM' }),
@@ -278,13 +278,13 @@ describe('stellarAdapter.encode', () => {
 });
 
 describe('stellarAdapter.verify', () => {
-  it('U-V-01 plain USDC payment with asset, amount, memo and payer right is accepted', async () => {
+  it('plain USDC payment with asset, amount, memo and payer right is accepted', async () => {
     fakeHorizon({ tx: okTx, ops: [plainOp()] });
     const res = await stellarAdapter.verify({ ...baseVerify });
     assert.equal(res.ok, true);
   });
 
-  it('U-V-02 path payment delivering the exact USDC with the order memo is accepted', async () => {
+  it('path payment delivering the exact USDC with the order memo is accepted', async () => {
     fakeHorizon({ tx: okTx, ops: [pathOp()] });
     const res = await stellarAdapter.verify({ ...baseVerify });
     assert.equal(res.ok, true);
@@ -295,41 +295,41 @@ describe('stellarAdapter.verify', () => {
     }
   });
 
-  it('U-V-03 path payment delivering USDC from another issuer is rejected', async () => {
+  it('path payment delivering USDC from another issuer is rejected', async () => {
     fakeHorizon({ tx: okTx, ops: [pathOp({ asset_issuer: OTHER_ISSUER })] });
     const res = await stellarAdapter.verify({ ...baseVerify });
     assert.equal(res.ok, false);
     if (!res.ok) assert.match(res.reason, /no matching USDC payment/);
   });
 
-  it('U-V-04 path payment to another account is rejected', async () => {
+  it('path payment to another account is rejected', async () => {
     fakeHorizon({ tx: okTx, ops: [pathOp({ to: STRANGER })] });
     const res = await stellarAdapter.verify({ ...baseVerify });
     assert.equal(res.ok, false);
   });
 
-  it('U-V-05 path payment delivering less than the order amount is rejected', async () => {
+  it('path payment delivering less than the order amount is rejected', async () => {
     fakeHorizon({ tx: okTx, ops: [pathOp({ amount: '12.4999999' })] });
     const res = await stellarAdapter.verify({ ...baseVerify });
     assert.equal(res.ok, false);
     if (!res.ok) assert.match(res.reason, /< expected/);
   });
 
-  it('U-V-06 path payment with the wrong memo is rejected', async () => {
+  it('path payment with the wrong memo is rejected', async () => {
     fakeHorizon({ tx: { ...okTx, memo: 'ffffffffffff' }, ops: [pathOp()] });
     const res = await stellarAdapter.verify({ ...baseVerify });
     assert.equal(res.ok, false);
     if (!res.ok) assert.match(res.reason, /memo does not match/);
   });
 
-  it('U-V-07 path payment from another payer is rejected', async () => {
+  it('path payment from another payer is rejected', async () => {
     fakeHorizon({ tx: okTx, ops: [pathOp({ from: STRANGER })] });
     const res = await stellarAdapter.verify({ ...baseVerify });
     assert.equal(res.ok, false);
     if (!res.ok) assert.match(res.reason, /!= expected/);
   });
 
-  it('U-V-08 a strict-send path payment is not accepted', async () => {
+  it('a strict-send path payment is not accepted', async () => {
     fakeHorizon({ tx: okTx, ops: [pathOp({ type: 'path_payment_strict_send' })] });
     const res = await stellarAdapter.verify({ ...baseVerify });
     assert.equal(res.ok, false);
@@ -345,20 +345,20 @@ describe('stellarAdapter.verify', () => {
   };
   const expiryVerify = { ...baseVerify, maxTime: PAST_MAX_TIME, builtTxHash: TX_HASH };
 
-  it('U-D2-03 the built tx is not on Horizon, its max time passed and Horizon ingested past it: order expired', async () => {
+  it('the built tx is not on Horizon, its max time passed and Horizon ingested past it: order expired', async () => {
     fakeHorizon(expiredCase);
     const res = await stellarAdapter.verify(expiryVerify);
     assert.equal(res.ok, false);
     if (!res.ok) assert.equal(res.reason, STELLAR_ORDER_EXPIRED);
   });
 
-  it('U-D2-03b the latest ledger is read BEFORE the tx lookup, then the payer is checked', async () => {
+  it('the latest ledger is read BEFORE the tx lookup, then the payer is checked', async () => {
     fakeHorizon(expiredCase);
     await stellarAdapter.verify(expiryVerify);
     assert.deepEqual(horizonCalls, ['ledger', 'tx', 'payerTxs']);
   });
 
-  it('U-D2-04 Horizon has not ingested past max time plus the grace: still pending', async () => {
+  it('Horizon has not ingested past max time plus the grace: still pending', async () => {
     fakeHorizon({
       ...expiredCase,
       latestLedgerClosedAt: isoAt(PAST_MAX_TIME + STELLAR_EXPIRY_GRACE_SECONDS),
@@ -368,7 +368,7 @@ describe('stellarAdapter.verify', () => {
     if (!res.ok) assert.equal(res.reason, 'tx not found');
   });
 
-  it('U-D2-05 a 5xx or timeout on the tx lookup never becomes expired', async () => {
+  it('a 5xx or timeout on the tx lookup never becomes expired', async () => {
     fakeHorizon({
       ...expiredCase,
       tx: () => {
@@ -380,14 +380,14 @@ describe('stellarAdapter.verify', () => {
     if (!res.ok) assert.equal(res.reason, 'tx not found');
   });
 
-  it("U-D2-06 orders without a max time keep today's retryable answer", async () => {
+  it("orders without a max time keep today's retryable answer", async () => {
     fakeHorizon(expiredCase);
     const res = await stellarAdapter.verify({ ...baseVerify, builtTxHash: TX_HASH });
     assert.equal(res.ok, false);
     if (!res.ok) assert.equal(res.reason, 'tx not found');
   });
 
-  it('U-D2-07 latest-ledger lookup failing keeps the retryable answer', async () => {
+  it('latest-ledger lookup failing keeps the retryable answer', async () => {
     fakeHorizon({
       ...expiredCase,
       latestLedgerClosedAt: () => {
@@ -399,7 +399,7 @@ describe('stellarAdapter.verify', () => {
     if (!res.ok) assert.equal(res.reason, 'tx not found');
   });
 
-  it('U-D2-08 a hash other than the built tx never expires the order', async () => {
+  it('a hash other than the built tx never expires the order', async () => {
     fakeHorizon(expiredCase);
     const res = await stellarAdapter.verify({ ...expiryVerify, txHash: OTHER_HASH });
     assert.equal(res.ok, false);
@@ -407,7 +407,7 @@ describe('stellarAdapter.verify', () => {
     assert.deepEqual(horizonCalls, ['tx']);
   });
 
-  it('U-D2-09 the payer landed another tx with the order memo: not expired', async () => {
+  it('the payer landed another tx with the order memo: not expired', async () => {
     fakeHorizon({
       ...expiredCase,
       payerTxs: [
@@ -419,7 +419,7 @@ describe('stellarAdapter.verify', () => {
     if (!res.ok) assert.equal(res.reason, 'tx not found');
   });
 
-  it('U-D2-10 a payer-history lookup error never becomes expired', async () => {
+  it('a payer-history lookup error never becomes expired', async () => {
     fakeHorizon({
       ...expiredCase,
       payerTxs: () => {
@@ -431,7 +431,7 @@ describe('stellarAdapter.verify', () => {
     if (!res.ok) assert.equal(res.reason, 'tx not found');
   });
 
-  it('U-D2-11 a payer page too full to be sure never becomes expired', async () => {
+  it('a payer page too full to be sure never becomes expired', async () => {
     const recent = { successful: true, memo_type: 'none', created_at: isoAt(PAST_MAX_TIME) };
     fakeHorizon({ ...expiredCase, payerTxs: Array.from({ length: 50 }, () => recent) });
     const res = await stellarAdapter.verify(expiryVerify);
@@ -439,7 +439,7 @@ describe('stellarAdapter.verify', () => {
     if (!res.ok) assert.equal(res.reason, 'tx not found');
   });
 
-  it('U-D2-12 before max time plus the grace, verify reads nothing extra', async () => {
+  it('before max time plus the grace, verify reads nothing extra', async () => {
     fakeHorizon(expiredCase);
     const future = Math.floor(Date.now() / 1000) + 600;
     const res = await stellarAdapter.verify({ ...expiryVerify, maxTime: future });
