@@ -171,6 +171,44 @@ export class OrderService {
     };
   }
 
+  // What verify needs when the cached quote is gone: the deposit address, payer,
+  // amount and payout recipient, all written when the order was placed. Tenant
+  // scoped. `amount` is the USDC amount as a decimal string and `qrPayload` the
+  // decoded merchant QR, exactly as stored.
+  async findVerifyContextByOrderIdAndTenant(
+    orderId: string,
+    tenantId: number,
+  ): Promise<{
+    readonly status: string;
+    readonly chain: string;
+    readonly token: string;
+    readonly fromAddress: string;
+    readonly toAddress: string;
+    readonly amount: string;
+    readonly fiatAmount: string;
+    readonly fiatCurrency: string;
+    readonly qrPayload: unknown;
+  } | null> {
+    const rows = await this.db
+      .select({
+        status: orders.status,
+        chain: cryptoTransfers.chain,
+        token: cryptoTransfers.token,
+        fromAddress: cryptoTransfers.fromAddress,
+        toAddress: cryptoTransfers.toAddress,
+        amount: cryptoTransfers.amount,
+        fiatAmount: orders.fiatAmount,
+        fiatCurrency: orders.fiatCurrency,
+        qrPayload: orderPayment.qrPayload,
+      })
+      .from(orders)
+      .innerJoin(cryptoTransfers, eq(cryptoTransfers.orderId, orders.id))
+      .innerJoin(orderPayment, eq(orderPayment.orderId, orders.id))
+      .where(and(eq(orders.orderId, orderId), eq(orders.tenantId, tenantId)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
   async requireByOrderId(orderId: string): Promise<OrderRow> {
     const found = await this.findByOrderId(orderId);
     if (!found) throw new NotFoundError(`Order ${orderId}`);

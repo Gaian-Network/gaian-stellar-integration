@@ -4,6 +4,7 @@ import {
   stellarMemoFromOrderId,
 } from '@gaian-stellar-integration/chains';
 import {
+  AppError,
   AuthenticationError,
   AuthorizationError,
   CHAIN_IDS,
@@ -16,6 +17,7 @@ import {
   v2VerifyStatusCode,
 } from '@gaian-stellar-integration/config';
 import {
+  decodedQrInfoSchema,
   v2ErrorEnvelopeSchema,
   v2OkEnvelope,
   v2PlaceOrderRequestSchema,
@@ -23,6 +25,7 @@ import {
   v2StatusResponseSchema,
   v2VerifyRequestSchema,
   v2VerifyResponseSchema,
+  type DecodedQrInfo,
   type V2PlaceOrderResponse,
   type V2StatusResponse,
   type V2VerifyResponse,
@@ -37,6 +40,7 @@ import {
   stellarTransferMetadata,
 } from '../services/stellar-transfer-metadata.js';
 
+import type { ChainId } from '@gaian-stellar-integration/config';
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 
 const v2IdParamsSchema = z.object({ id: z.string().min(1) });
@@ -47,6 +51,50 @@ const envelopeErrors = {
   404: v2ErrorEnvelopeSchema,
   409: v2ErrorEnvelopeSchema,
 } as const;
+
+/** What verify checks against and what the payout needs, from the quote or from the order rows. */
+interface VerifyContext {
+  readonly chain: ChainId;
+  readonly token: string;
+  readonly depositAddress: string;
+  readonly fromAddress: string;
+  readonly amountBaseUnits: string;
+  readonly fiatAmount: number;
+  readonly fiatCurrency: string;
+  readonly qrInfo: DecodedQrInfo;
+  readonly country: string;
+}
+
+/** Drops zeros after the decimal point: "10.50000000" -> "10.5", "10.00000000" -> "10". */
+const trimDecimal = (v: string): string => (v.includes('.') ? v.replace(/\.?0+$/, '') : v);
+
+const verifyContextFromRow = (
+  row: NonNullable<Awaited<ReturnType<OrderService['findVerifyContextByOrderIdAndTenant']>>>,
+): VerifyContext => {
+  const qr = decodedQrInfoSchema.safeParse(row.qrPayload);
+  if (!qr.success) {
+    throw new AppError('order is missing its payout recipient', {
+      category: 'INTERNAL',
+      statusCode: 500,
+      severity: 'HIGH',
+      code: 'ORDER_RECIPIENT_MISSING',
+    });
+  }
+  return {
+    chain: row.chain as ChainId,
+    token: row.token,
+    depositAddress: row.toAddress,
+    fromAddress: row.fromAddress,
+    amountBaseUnits: getChainAdapter(row.chain as ChainId).amountBaseUnits(
+      row.token,
+      trimDecimal(row.amount),
+    ),
+    fiatAmount: Number(row.fiatAmount),
+    fiatCurrency: row.fiatCurrency,
+    qrInfo: qr.data,
+    country: qr.data.country,
+  };
+};
 
 export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const orders = new OrderService(app.db);
@@ -215,27 +263,49 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
       const order = await orders.findByOrderIdAndTenant(id, tenant.id);
       if (!order) throw new NotFoundError(`Order ${id}`);
 
+      // Peek; consume only after verification succeeds.
       const quote = await quotes.getByOrderId(id);
-      if (!quote) {
+
+      /**
+       * What verify checks the on-chain transfer against and what the payout needs.
+       * Taken from the cached quote while it is there, and rebuilt from Postgres when
+       * it is not. The quote key lives for QUOTE_TTL_SECONDS, which is also the order
+       * expiry, so by the time an order can be told it expired the quote is always
+       * gone. The order rows already hold every value, written when the order was
+       * placed, so nothing here is inferred.
+       */
+      const fromDb = quote ? null : await orders.findVerifyContextByOrderIdAndTenant(id, tenant.id);
+
+      if (!quote && fromDb?.status === 'expired') {
         // Asked again, with the same tx, after verify expired the order unpaid:
         // same answer, not a 409. Anything else keeps the 409.
-        if (order.status === 'expired') {
-          const state = await orders.findTransferState(order.id);
-          const builtTxHash = stellarBuiltTxHashFromMetadata(state?.metadata);
-          if (
-            state !== null &&
-            !state.isConfirmed &&
-            builtTxHash?.toLowerCase() === body.transactionHash.toLowerCase()
-          ) {
-            return await reply.ok(orderExpiredResponse());
-          }
+        const state = await orders.findTransferState(order.id);
+        const builtTxHash = stellarBuiltTxHashFromMetadata(state?.metadata);
+        if (
+          state !== null &&
+          !state.isConfirmed &&
+          builtTxHash?.toLowerCase() === body.transactionHash.toLowerCase()
+        ) {
+          return await reply.ok(orderExpiredResponse());
         }
+      }
+      if (!quote && !fromDb) {
         throw new ConflictError('quote expired or already consumed');
       }
-
-      if (quote.chain !== CHAIN_IDS.STELLAR) {
-        throw new ValidationError(`This endpoint only supports Stellar orders. Got chain: ${quote.chain}`);
+      // The quote being single-use was the only thing stopping a second verify from
+      // dispatching a second payout. Without it the status takes over the job: only
+      // an order still awaiting its deposit may be verified.
+      if (fromDb && fromDb.status !== 'awaiting_deposit') {
+        throw new ConflictError(`order is no longer awaiting a deposit (status: ${fromDb.status})`);
       }
+
+      if ((quote?.chain ?? fromDb?.chain) !== CHAIN_IDS.STELLAR) {
+        throw new ValidationError(
+          `This endpoint only supports Stellar orders. Got chain: ${quote?.chain ?? fromDb?.chain ?? 'unknown'}`,
+        );
+      }
+
+      const vctx: VerifyContext = quote ?? verifyContextFromRow(fromDb as NonNullable<typeof fromDb>);
 
       // The tx time bound and built tx hash written at order time. Read from the
       // durable row (the quote is usually gone by the time an order has expired).
@@ -244,14 +314,14 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
       const stellarBuiltTxHash = stellarBuiltTxHashFromMetadata(transferState?.metadata);
 
       // Verify the transaction on Stellar Horizon.
-      const adapter = getChainAdapter(quote.chain);
+      const adapter = getChainAdapter(vctx.chain);
       const verification = await adapter.verify({
-        chain: quote.chain,
-        token: quote.token,
+        chain: vctx.chain,
+        token: vctx.token,
         txHash: body.transactionHash,
-        expectedToAddress: quote.depositAddress,
-        expectedFromAddress: quote.fromAddress,
-        minAmountBaseUnits: quote.amountBaseUnits,
+        expectedToAddress: vctx.depositAddress,
+        expectedFromAddress: vctx.fromAddress,
+        minAmountBaseUnits: vctx.amountBaseUnits,
         memo: stellarMemoFromOrderId(id),
         ...(stellarMaxTime !== undefined ? { maxTime: stellarMaxTime } : {}),
         ...(stellarBuiltTxHash !== undefined ? { builtTxHash: stellarBuiltTxHash } : {}),
@@ -293,23 +363,27 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         return await reply.ok(verifyResponse('failed', verification.reason));
       }
 
-      // Consume quote and advance order status concurrently.
+      // Only an order still awaiting its deposit may move on, so a repeated or
+      // parallel verify cannot dispatch a second payout.
+      const advanced = await orders.updateStatus(id, 'processing', 'verified on-chain', 'awaiting_deposit');
+      if (!advanced) {
+        throw new ConflictError('order is no longer awaiting a deposit');
+      }
       await Promise.all([
         quotes.consumeByOrderId(id),
         orders.setTransactionHash(id, body.transactionHash, order.id),
-        orders.updateStatus(id, 'processing', 'verified on-chain'),
       ]);
 
       // Dispatch fiat payout.
       await app.payout.dispatch({
         orderId: id,
-        fiatAmount: quote.fiatAmount.toString(),
-        fiatCurrency: quote.fiatCurrency,
+        fiatAmount: vctx.fiatAmount.toString(),
+        fiatCurrency: vctx.fiatCurrency,
         recipient: {
-          accountNumber: quote.qrInfo.accountNumber,
-          bankCode: quote.qrInfo.bankBin,
-          beneficiaryName: quote.qrInfo.beneficiaryName,
-          country: quote.country,
+          accountNumber: vctx.qrInfo.accountNumber,
+          bankCode: vctx.qrInfo.bankBin,
+          beneficiaryName: vctx.qrInfo.beneficiaryName,
+          country: vctx.country,
         },
       });
 

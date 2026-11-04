@@ -67,7 +67,7 @@ Send `sourceAsset: "XLM"` in `POST /orders` for a Stellar USDC order. Omit it, o
 2. **Order**: `POST /orders` with `sourceAsset: "XLM"` asks Horizon's strict-receive path search for the live XLM price of that exact USDC amount. It returns the XDR plus `sourceAsset` (`"XLM"`) and `sendMax`. If Horizon finds no path, the request fails and no order is created.
 3. **Slippage cap**: `sendMax` is the live quote plus 1%, rounded up to the stroop. The wallet signs for at most `sendMax` XLM. The cap is fixed and is not set per tenant.
 4. **Sign and submit**: the buyer signs the XDR and submits it to Stellar. The USDC leg is exact, so the deposit account never receives less than the quote.
-5. **Verify**: `POST /orders/:id/verify` reads the transaction from Horizon. A path payment is checked like a plain payment: destination account, USDC asset and issuer, exact amount, order memo and payer address must all match.
+5. **Verify**: `POST /orders/:id/verify` reads the transaction from Horizon. A path payment is checked like a plain payment: destination account, USDC asset and issuer, order memo and payer address must match, and the USDC delivered must be at least the quoted amount. A path payment delivers exactly the quoted amount by construction.
 
 ## Order expiry
 
@@ -80,7 +80,7 @@ Every Stellar transaction is built with the order expiry as its maximum time (`t
 - Horizon has ingested a ledger that closed after that time and still does not know the hash,
 - the payer account shows no successful transaction with the order memo.
 
-Any doubt (a Horizon error, a busy payer history) keeps the order retryable and returns `pending`. When an order does expire, the reply is `statusLabel: "failed"`, `message: "order expired"` and `reasonCode: "ORDER_EXPIRED"`. The same answer is returned if the wallet asks again with the same hash. The status change is a compare-and-set from `awaiting_deposit`, so a payment verified at the same moment is never overwritten.
+Any doubt (a Horizon error, a busy payer history) keeps the order retryable and returns `pending`. When an order does expire, the reply is `statusLabel: "failed"`, `message: "order expired"` and `reasonCode: "ORDER_EXPIRED"`. The same answer is returned if the wallet asks again with the same hash. Verify reads the deposit address, payer, amount and payout recipient from the order records when the cached quote has already expired, so the answer does not depend on how long the quote key lives. The status change is a compare-and-set from `awaiting_deposit`, so a payment verified at the same moment is never overwritten.
 
 ## Tests
 
