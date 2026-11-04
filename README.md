@@ -1,4 +1,4 @@
-# Gaian Network — Stellar Integration
+# Gaian Network: Stellar Integration
 
 A payment API that bridges **Stellar USDC** to local fiat disbursement across Southeast Asia. This repository demonstrates how Gaian Network uses the Stellar blockchain as the settlement layer for real-time cross-border payments.
 
@@ -6,17 +6,17 @@ A payment API that bridges **Stellar USDC** to local fiat disbursement across So
 
 Gaian Network enables merchants and end-users to pay local fiat bills (QR payments, bank transfers) by sending USDC on the Stellar network. The integration handles:
 
-- **QR code parsing** — decode EMVCo / VietQR payment QR codes to extract fiat amount and recipient
-- **Quote generation** — compute the exact USDC amount required at current exchange rates
-- **Transaction encoding** — build a Stellar XDR payment transaction for the user to sign
-- **On-chain verification** — confirm USDC received on Stellar Horizon before releasing fiat
+- **QR code parsing**: decode EMVCo / VietQR payment QR codes to extract fiat amount and recipient
+- **Quote generation**: compute the exact USDC amount required at current exchange rates
+- **Transaction encoding**: build a Stellar XDR transaction for the user to sign, either a USDC payment or an XLM path payment that delivers the same USDC
+- **On-chain verification**: confirm USDC received on Stellar Horizon before releasing fiat
 
 ## Why Stellar
 
-- **Low fees** — sub-cent transaction costs make small-value retail payments viable
-- **Fast finality** — 3–5 second settlement vs. multi-day traditional remittance
-- **USDC native** — Circle's USDC on Stellar is the settlement asset; no wrapping or bridging
-- **Horizon API** — simple, reliable REST interface for transaction submission and verification
+- **Low fees**: sub-cent transaction costs make small-value retail payments viable
+- **Fast finality**: 3 to 5 second settlement vs. multi-day traditional remittance
+- **USDC native**: Circle's USDC on Stellar is the settlement asset, with no wrapping or bridging
+- **Horizon API**: a REST interface for transaction submission and verification
 
 ## Payment flow
 
@@ -49,5 +49,41 @@ Every Stellar order pays into one shared Gaian deposit account. Amount and sende
 - **Webhooks**: every status transition is handed to Gaian's webhook service (`src/services/webhook-event-publisher.ts`), which stores tenant endpoints, signs deliveries (HMAC) and retries. Event type `order.status.updated`, idempotency key per transition.
 
 Payments carrying an order memo settle into Gaian's Stellar deposit account and are matched to their order by the flow above.
+
+## Accepted assets
+
+A buyer can fund a Stellar order with either asset. The deposit account always receives USDC, and the payout amount is always the USDC amount of the quote.
+
+| Asset | How the buyer pays | What the deposit account receives |
+|---|---|---|
+| USDC | A plain payment of the exact USDC amount | The exact USDC amount |
+| XLM | A path payment (`path_payment_strict_receive`) that spends XLM | The exact USDC amount, swapped on the Stellar DEX |
+
+## Pay with XLM
+
+Send `sourceAsset: "XLM"` in `POST /orders` for a Stellar USDC order. Omit it, or send `"USDC"`, for the plain USDC payment. The field is rejected for any other order.
+
+1. **Quote**: `POST /quote` is unchanged. The quote fixes the USDC amount and the payout.
+2. **Order**: `POST /orders` with `sourceAsset: "XLM"` asks Horizon's strict-receive path search for the live XLM price of that exact USDC amount. It returns the XDR plus `sourceAsset` (`"XLM"`) and `sendMax`. If Horizon finds no path, the request fails and no order is created.
+3. **Slippage cap**: `sendMax` is the live quote plus 1%, rounded up to the stroop. The wallet signs for at most `sendMax` XLM. The cap is fixed and is not set per tenant.
+4. **Sign and submit**: the buyer signs the XDR and submits it to Stellar. The USDC leg is exact, so the deposit account never receives less than the quote.
+5. **Verify**: `POST /orders/:id/verify` reads the transaction from Horizon. A path payment is checked like a plain payment: destination account, USDC asset and issuer, exact amount, order memo and payer address must all match.
+
+## Order expiry
+
+Every Stellar transaction is built with the order expiry as its maximum time (`timebounds.maxTime`), for both USDC and XLM payments. A signature that arrives after the order closed is rejected by the network with `tx_too_late`, so it cannot pay a closed order.
+
+`POST /orders/:id/verify` marks an order `expired` only when all of the following hold:
+
+- the hash is the one Gaian built for the order,
+- the maximum time plus a 60 second grace has passed,
+- Horizon has ingested a ledger that closed after that time and still does not know the hash,
+- the payer account shows no successful transaction with the order memo.
+
+Any doubt (a Horizon error, a busy payer history) keeps the order retryable and returns `pending`. When an order does expire, the reply is `statusLabel: "failed"`, `message: "order expired"` and `reasonCode: "ORDER_EXPIRED"`. The same answer is returned if the wallet asks again with the same hash. The status change is a compare-and-set from `awaiting_deposit`, so a payment verified at the same moment is never overwritten.
+
+## Tests
+
+`pnpm test` runs the adapter tests with the Node test runner. They cover plain USDC payments, XLM path payments (cheapest path, 1% cap, rounding up), the transaction time bound, verification of plain and path payments (wrong issuer, destination, amount, memo or payer), and the order expiry rules above. Horizon is mocked, so the tests need no network.
 
 Delivered under Stellar Instaward 2 (payment reconciliation engine).

@@ -177,7 +177,16 @@ export class OrderService {
     return found;
   }
 
-  async updateStatus(orderId: string, nextStatus: string, event = 'status updated'): Promise<void> {
+  // Returns true when this call wrote the transition. `expectedFrom` makes it a
+  // compare-and-set: write only if the order is still in that status. For a
+  // transition that is wrong from anywhere else (expiring an order a parallel
+  // verify just paid).
+  async updateStatus(
+    orderId: string,
+    nextStatus: string,
+    event = 'status updated',
+    expectedFrom?: string,
+  ): Promise<boolean> {
     let didTransition = false;
     let fromStatus: string | undefined;
     let transitionId: number | undefined;
@@ -197,10 +206,15 @@ export class OrderService {
         );
         return;
       }
-      await tx
+      if (expectedFrom !== undefined && current.current !== expectedFrom) return;
+      // Compare-and-set: only transition if the status is STILL what we read, so
+      // two concurrent writers cannot both pass the checks above.
+      const updated = await tx
         .update(orders)
         .set({ status: nextStatus, updatedAt: new Date() })
-        .where(eq(orders.id, current.id));
+        .where(and(eq(orders.id, current.id), eq(orders.status, current.current)))
+        .returning({ id: orders.id });
+      if (updated.length === 0) return;
       const history = await tx
         .insert(orderStatusHistory)
         .values({
@@ -233,7 +247,22 @@ export class OrderService {
         if (fresh) void publishOrderStatusEvent(fresh, { id: transitionId, status: nextStatus });
       }
     }
+    return didTransition;
+  }
 
+  // The order's crypto transfer: its jsonb metadata (Stellar time bound, built
+  // tx hash, path payment details) and whether a deposit was ever confirmed on
+  // it. Null when the order has no transfer row.
+  async findTransferState(
+    orderRowId: number,
+  ): Promise<{ readonly metadata: unknown; readonly isConfirmed: boolean } | null> {
+    const rows = await this.db
+      .select({ metadata: cryptoTransfers.metadata, isConfirmed: cryptoTransfers.isConfirmed })
+      .from(cryptoTransfers)
+      .where(eq(cryptoTransfers.orderId, orderRowId))
+      .limit(1);
+    const row = rows[0];
+    return row ? { metadata: row.metadata ?? null, isConfirmed: row.isConfirmed } : null;
   }
 
   async setTransactionHash(

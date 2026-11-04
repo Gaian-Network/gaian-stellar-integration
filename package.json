@@ -9,7 +9,8 @@
   },
   "scripts": {
     "build": "tsc -b packages/config packages/core packages/db packages/chains && tsc -p tsconfig.json",
-    "type-check": "tsc -b packages/config packages/core packages/db packages/chains --noEmit && tsc -p tsconfig.json --noEmit",
+    "type-check": "tsc -b packages/config packages/core packages/db packages/chains && tsc -p tsconfig.json --noEmit",
+    "test": "pnpm --filter @gaian-stellar-integration/chains test && tsc -p tsconfig.test.json && node --import tsx --test test/*.test.ts",
     "dev": "sh -c 'if [ -f .env ]; then tsx watch --env-file=.env src/app.ts; else tsx watch src/app.ts; fi'",
     "clean": "rm -rf dist packages/*/dist"
   },

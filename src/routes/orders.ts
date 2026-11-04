@@ -1,4 +1,8 @@
-import { getChainAdapter, stellarMemoFromOrderId } from '@gaian-stellar-integration/chains';
+import {
+  getChainAdapter,
+  STELLAR_ORDER_EXPIRED,
+  stellarMemoFromOrderId,
+} from '@gaian-stellar-integration/chains';
 import {
   AuthenticationError,
   AuthorizationError,
@@ -27,6 +31,11 @@ import { z } from 'zod';
 
 import { OrderService } from '../services/order-service.js';
 import { createQuoteService, type StoredQuote } from '../services/quote-service.js';
+import {
+  stellarBuiltTxHashFromMetadata,
+  stellarMaxTimeFromMetadata,
+  stellarTransferMetadata,
+} from '../services/stellar-transfer-metadata.js';
 
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 
@@ -87,6 +96,13 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         throw new ValidationError(`This endpoint only supports Stellar orders. Got chain: ${quote.chain}`);
       }
 
+      // Pay with XLM exists only where Stellar's DEX can deliver the order's
+      // exact USDC: a Stellar USDC order. Anywhere else it is a client error.
+      const payWithXlm = body.sourceAsset === 'XLM';
+      if (payWithXlm && quote.token !== 'USDC') {
+        throw new ValidationError('sourceAsset XLM is only available for Stellar USDC orders');
+      }
+
       await requireKyc(quote);
 
       const adapter = getChainAdapter(quote.chain);
@@ -98,7 +114,13 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         toAddress: quote.depositAddress,
         amount: quote.cryptoAmount,
         memo,
+        // The order expiry becomes the Stellar tx max time: a late signature on
+        // the tx built here is rejected by the network (tx_too_late) instead of
+        // paying an order that is already closed.
+        expiresAt: quote.expiresAt,
+        ...(payWithXlm ? { sourceAsset: 'XLM' as const } : {}),
       });
+      const stellarMetadata = stellarTransferMetadata(encoded);
 
       await orders.createOrder({
         orderId: quote.orderId,
@@ -124,6 +146,7 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
           token: quote.token,
           amount: Number(quote.cryptoAmount),
         },
+        ...(stellarMetadata !== undefined ? { metadata: { ...stellarMetadata } } : {}),
       });
 
       const response: V2PlaceOrderResponse = {
@@ -139,6 +162,12 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         encodedTransaction: encoded.encodedTransaction,
         expiresAt: quote.expiresAt,
         memo,
+        ...(encoded.stellar?.pathPayment
+          ? {
+              sourceAsset: encoded.stellar.pathPayment.sourceAsset,
+              sendMax: encoded.stellar.pathPayment.sendMax,
+            }
+          : {}),
       };
       return await reply.ok(response);
     },
@@ -170,23 +199,49 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
       const verifyResponse = (
         statusLabel: 'verified' | 'failed' | 'pending',
         message: string,
+        reasonCode?: string,
       ): V2VerifyResponse => ({
         orderId: id,
         status: v2VerifyStatusCode(statusLabel),
         statusLabel,
         transactionHash: body.transactionHash,
         message,
+        ...(reasonCode !== undefined ? { reasonCode } : {}),
       });
+      // A clear, stable answer for the wallet in place of a generic failure.
+      const orderExpiredResponse = (): V2VerifyResponse =>
+        verifyResponse('failed', STELLAR_ORDER_EXPIRED, 'ORDER_EXPIRED');
 
       const order = await orders.findByOrderIdAndTenant(id, tenant.id);
       if (!order) throw new NotFoundError(`Order ${id}`);
 
       const quote = await quotes.getByOrderId(id);
-      if (!quote) throw new ConflictError('quote expired or already consumed');
+      if (!quote) {
+        // Asked again, with the same tx, after verify expired the order unpaid:
+        // same answer, not a 409. Anything else keeps the 409.
+        if (order.status === 'expired') {
+          const state = await orders.findTransferState(order.id);
+          const builtTxHash = stellarBuiltTxHashFromMetadata(state?.metadata);
+          if (
+            state !== null &&
+            !state.isConfirmed &&
+            builtTxHash?.toLowerCase() === body.transactionHash.toLowerCase()
+          ) {
+            return await reply.ok(orderExpiredResponse());
+          }
+        }
+        throw new ConflictError('quote expired or already consumed');
+      }
 
       if (quote.chain !== CHAIN_IDS.STELLAR) {
         throw new ValidationError(`This endpoint only supports Stellar orders. Got chain: ${quote.chain}`);
       }
+
+      // The tx time bound and built tx hash written at order time. Read from the
+      // durable row (the quote is usually gone by the time an order has expired).
+      const transferState = await orders.findTransferState(order.id);
+      const stellarMaxTime = stellarMaxTimeFromMetadata(transferState?.metadata);
+      const stellarBuiltTxHash = stellarBuiltTxHashFromMetadata(transferState?.metadata);
 
       // Verify the transaction on Stellar Horizon.
       const adapter = getChainAdapter(quote.chain);
@@ -198,6 +253,8 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         expectedFromAddress: quote.fromAddress,
         minAmountBaseUnits: quote.amountBaseUnits,
         memo: stellarMemoFromOrderId(id),
+        ...(stellarMaxTime !== undefined ? { maxTime: stellarMaxTime } : {}),
+        ...(stellarBuiltTxHash !== undefined ? { builtTxHash: stellarBuiltTxHash } : {}),
       });
 
       if (!verification.ok) {
@@ -205,6 +262,28 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         // Return pending so the caller can retry with the same hash.
         if (verification.reason === 'tx not found') {
           return await reply.ok(verifyResponse('pending', verification.reason));
+        }
+        // The adapter only says this for the tx built for this order, once the
+        // network can no longer accept it and the payer landed nothing with the
+        // order memo, so closing the order cannot strand a payment on its way.
+        if (verification.reason === STELLAR_ORDER_EXPIRED) {
+          // Only from awaiting_deposit: a parallel verify of a real payment may
+          // have moved the order on, and expiring it then would orphan the payout.
+          const expired = await orders.updateStatus(
+            id,
+            'expired',
+            'order expired before payment',
+            'awaiting_deposit',
+          );
+          if (!expired) {
+            throw new ConflictError('order is no longer awaiting a deposit');
+          }
+          await quotes.consumeByOrderId(id);
+          logger.warn(
+            { orderId: id, txHash: body.transactionHash },
+            'v2.verify_order_expired',
+          );
+          return await reply.ok(orderExpiredResponse());
         }
         await Promise.all([
           quotes.consumeByOrderId(id),
