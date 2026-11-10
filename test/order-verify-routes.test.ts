@@ -174,4 +174,60 @@ describe('POST /orders/:id/verify', () => {
       assert.equal(rig.calls.payout.length, 0);
     });
   });
+
+  describe('transaction hash and failed verify', () => {
+    it('refuses a hash that is not 64 hex characters before the network or any row sees it', async () => {
+      rig.state.context = orderRowContext();
+
+      const { res } = await verifyOrder(rig, `${BUILT_TX_HASH}/../${BUILT_TX_HASH}`);
+
+      assert.equal(res.statusCode, 400);
+      assert.equal(rig.calls.verify.length, 0);
+      assert.equal(rig.calls.updateStatus.length, 0);
+    });
+
+    it('refuses a body with no transaction hash through the route schema', async () => {
+      const res = await rig.app.inject({
+        method: 'POST',
+        url: `/api/v2/orders/${ORDER_ID}/verify`,
+        headers: tenantHeaders,
+        payload: {},
+      });
+
+      assert.equal(res.statusCode, 400);
+      assert.equal(rig.calls.verify.length, 0);
+    });
+
+    it('hands the network the hash in lower case', async () => {
+      rig.state.context = orderRowContext();
+      rig.state.verifyResult = { ok: false, reason: 'tx not found' } as never;
+
+      await verifyOrder(rig, BUILT_TX_HASH.toUpperCase());
+
+      assert.equal(rig.calls.verify[0]?.['txHash'], BUILT_TX_HASH);
+    });
+
+    it('fails the order only from awaiting_deposit when the hash does not pay it', async () => {
+      putQuote(rig);
+      rig.state.verifyResult = { ok: false, reason: 'memo does not match expected order memo' } as never;
+
+      const { json } = await verifyOrder(rig);
+
+      assert.equal(json.data?.['statusLabel'], 'failed');
+      assert.equal(rig.calls.updateStatus[0]?.[1], 'failed');
+      assert.equal(rig.calls.updateStatus[0]?.[3], 'awaiting_deposit');
+      assert.equal(rig.redisStore.size, 0);
+    });
+
+    it('answers 409 and keeps the quote when a failing verify finds the order already moved on', async () => {
+      putQuote(rig);
+      rig.state.verifyResult = { ok: false, reason: 'memo does not match expected order memo' } as never;
+      rig.state.updateStatusResult = false;
+
+      const { res } = await verifyOrder(rig);
+
+      assert.equal(res.statusCode, 409);
+      assert.equal(rig.redisStore.size, 2);
+    });
+  });
 });

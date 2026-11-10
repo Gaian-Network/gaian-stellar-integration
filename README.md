@@ -82,8 +82,16 @@ Every Stellar transaction is built with the order expiry as its maximum time (`t
 
 Any doubt (a Horizon error, a busy payer history) keeps the order retryable and returns `pending`. When an order does expire, the reply is `statusLabel: "failed"`, `message: "order expired"` and `reasonCode: "ORDER_EXPIRED"`. The same answer is returned if the wallet asks again with the same hash. Verify reads the deposit address, payer, amount and payout recipient from the order records when the cached quote has already expired, so the answer does not depend on how long the quote key lives. The status change is a compare-and-set from `awaiting_deposit`, so a payment verified at the same moment is never overwritten.
 
+### Known gap: a late payment the wallet built itself
+
+The time bound protects only the transactions Gaian builds. A buyer can still send USDC with the order memo straight to the deposit account after the order expired. Verify then answers 409, because the order is no longer awaiting a deposit, so nothing is paid out and that USDC has to be refunded by hand. This gap is accepted and out of scope for the expiry work.
+
+## Run locally
+
+Set `DATABASE_URL` and `REDIS_URL` (in `.env` or the shell), then run `pnpm dev`. The server listens on `HOST:PORT` (default `0.0.0.0:3000`). Routes are under `/api/v2`.
+
 ## Tests
 
-`pnpm test` runs the adapter tests with the Node test runner. They cover plain USDC payments, XLM path payments (cheapest path, 1% cap, rounding up), the transaction time bound, verification of plain and path payments (wrong issuer, destination, amount, memo or payer), and the order expiry rules above. Horizon is mocked, so the tests need no network.
+`pnpm test` runs the adapter and route tests with the Node test runner. A boot test builds the whole app and checks that every route schema compiles. They cover plain USDC payments, XLM path payments (cheapest path, 1% cap, rounding up), the transaction time bound, verification of plain and path payments (wrong issuer, destination, amount, memo or payer), and the order expiry rules above. Horizon is mocked, so the tests need no network.
 
 Delivered under Stellar Instaward 2 (payment reconciliation engine).

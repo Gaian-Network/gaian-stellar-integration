@@ -243,6 +243,13 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
       if (!tenant) throw new AuthenticationError('Tenant authentication required');
       const { id } = req.params as { id: string };
       const body = req.body as ReturnType<typeof v2VerifyRequestSchema.parse>;
+      // The hash goes straight into a Horizon URL path, so anything but 64 hex
+      // characters (for example `H/../H`) is refused before it can reach the network
+      // or an order row. Lower case is the one canonical form.
+      if (!/^[0-9a-fA-F]{64}$/.test(body.transactionHash)) {
+        throw new ValidationError('transactionHash must be 64 hexadecimal characters');
+      }
+      const txHash = body.transactionHash.toLowerCase();
 
       const verifyResponse = (
         statusLabel: 'verified' | 'failed' | 'pending',
@@ -252,7 +259,7 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         orderId: id,
         status: v2VerifyStatusCode(statusLabel),
         statusLabel,
-        transactionHash: body.transactionHash,
+        transactionHash: txHash,
         message,
         ...(reasonCode !== undefined ? { reasonCode } : {}),
       });
@@ -284,7 +291,7 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         if (
           state !== null &&
           !state.isConfirmed &&
-          builtTxHash?.toLowerCase() === body.transactionHash.toLowerCase()
+          builtTxHash?.toLowerCase() === txHash
         ) {
           return await reply.ok(orderExpiredResponse());
         }
@@ -318,7 +325,7 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
       const verification = await adapter.verify({
         chain: vctx.chain,
         token: vctx.token,
-        txHash: body.transactionHash,
+        txHash,
         expectedToAddress: vctx.depositAddress,
         expectedFromAddress: vctx.fromAddress,
         minAmountBaseUnits: vctx.amountBaseUnits,
@@ -350,16 +357,25 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
           }
           await quotes.consumeByOrderId(id);
           logger.warn(
-            { orderId: id, txHash: body.transactionHash },
+            { orderId: id, txHash },
             'v2.verify_order_expired',
           );
           return await reply.ok(orderExpiredResponse());
         }
-        await Promise.all([
-          quotes.consumeByOrderId(id),
-          orders.updateStatus(id, 'failed', `verify failed: ${verification.reason}`),
-        ]);
-        logger.warn({ orderId: id, txHash: body.transactionHash, reason: verification.reason }, 'v2.verify_failed');
+        // Only an order still awaiting its deposit may be failed. A wrong hash
+        // must not fail an order whose own transaction can still land, and a slow
+        // failing call must not overwrite a status a parallel verify just wrote.
+        const failed = await orders.updateStatus(
+          id,
+          'failed',
+          `verify failed: ${verification.reason}`,
+          'awaiting_deposit',
+        );
+        if (!failed) {
+          throw new ConflictError('order is no longer awaiting a deposit');
+        }
+        await quotes.consumeByOrderId(id);
+        logger.warn({ orderId: id, txHash, reason: verification.reason }, 'v2.verify_failed');
         return await reply.ok(verifyResponse('failed', verification.reason));
       }
 
@@ -371,7 +387,7 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
       }
       await Promise.all([
         quotes.consumeByOrderId(id),
-        orders.setTransactionHash(id, body.transactionHash, order.id),
+        orders.setTransactionHash(id, txHash, order.id),
       ]);
 
       // Dispatch fiat payout.

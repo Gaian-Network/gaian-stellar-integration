@@ -4,6 +4,7 @@ import { mock } from 'node:test';
 
 import { getChainAdapter } from '@gaian-stellar-integration/chains';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 
 import { errorHandlerPlugin } from '../../src/plugins/error-handler.js';
 import { replyEnvelopePlugin } from '../../src/plugins/reply-envelope.js';
@@ -106,11 +107,8 @@ export const buildOrderRoutesRig = async (): Promise<OrderRoutesRig> => {
   });
 
   const app = Fastify({ logger: false });
-  // The route schemas are zod objects and this repo registers no zod compiler, so
-  // Fastify's default JSON schema compiler cannot build them. These two pass the data
-  // through, which leaves the route logic itself under test.
-  app.setValidatorCompiler(() => (data) => ({ value: data }));
-  app.setSerializerCompiler(() => (data) => JSON.stringify(data));
+  app.setValidatorCompiler(validatorCompiler);
+  app.setSerializerCompiler(serializerCompiler);
   await app.register(errorHandlerPlugin);
   await app.register(replyEnvelopePlugin);
   app.decorateRequest('tenant', undefined);
