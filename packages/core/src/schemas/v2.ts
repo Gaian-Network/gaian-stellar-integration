@@ -80,6 +80,9 @@ export type V2QuoteResponse = z.infer<typeof v2QuoteResponseSchema>;
 
 export const v2PlaceOrderRequestSchema = z.object({
   quoteId: z.string().min(1),
+  // Stellar USDC orders only. 'XLM' returns a path payment: the consumer spends
+  // XLM and the deposit address receives the exact USDC of the order.
+  sourceAsset: z.enum(['USDC', 'XLM']).optional(),
 });
 
 export type V2PlaceOrderRequest = z.infer<typeof v2PlaceOrderRequestSchema>;
@@ -97,6 +100,10 @@ export const v2PlaceOrderResponseSchema = z.object({
   encodedTransaction: z.string(),
   expiresAt: z.string(),
   memo: z.string().optional(),
+  // Present on XLM-paid Stellar orders: the asset the wallet spends and the most
+  // of it the transaction can debit (live path quote plus the 1% slippage cap).
+  sourceAsset: z.enum(['XLM']).optional(),
+  sendMax: z.string().optional(),
 });
 
 export type V2PlaceOrderResponse = z.infer<typeof v2PlaceOrderResponseSchema>;
@@ -113,6 +120,9 @@ export const v2VerifyResponseSchema = z.object({
   statusLabel: z.string(),
   transactionHash: z.string(),
   message: z.string(),
+  // Machine-readable failure cause. ORDER_EXPIRED: the order expired before its
+  // payment landed, and the transaction's time bound means it never can.
+  reasonCode: z.string().optional(),
 });
 
 export type V2VerifyResponse = z.infer<typeof v2VerifyResponseSchema>;

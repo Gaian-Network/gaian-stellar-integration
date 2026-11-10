@@ -5,6 +5,7 @@ import helmet from '@fastify/helmet';
 import sensible from '@fastify/sensible';
 import { env, logger, setRequestContext } from '@gaian-stellar-integration/config';
 import Fastify, { type FastifyBaseLogger } from 'fastify';
+import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod';
 
 import { authExtrasPlugin } from './plugins/auth-extras.js';
 import { authPlugin } from './plugins/auth.js';
@@ -25,6 +26,9 @@ export const buildApp = async () => {
     requestIdHeader: 'x-request-id',
     genReqId: () => randomUUID(),
   });
+
+  app.setValidatorCompiler(validatorCompiler);
+  app.setSerializerCompiler(serializerCompiler);
 
   app.addHook('onRequest', (req, _reply, done) => {
     setRequestContext({ requestId: String(req.id) });
