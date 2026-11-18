@@ -1,5 +1,10 @@
-import { getChainAdapter, stellarMemoFromOrderId } from '@gaian-stellar-integration/chains';
 import {
+  getChainAdapter,
+  STELLAR_ORDER_EXPIRED,
+  stellarMemoFromOrderId,
+} from '@gaian-stellar-integration/chains';
+import {
+  AppError,
   AuthenticationError,
   AuthorizationError,
   CHAIN_IDS,
@@ -12,6 +17,7 @@ import {
   v2VerifyStatusCode,
 } from '@gaian-stellar-integration/config';
 import {
+  decodedQrInfoSchema,
   v2ErrorEnvelopeSchema,
   v2OkEnvelope,
   v2PlaceOrderRequestSchema,
@@ -19,6 +25,7 @@ import {
   v2StatusResponseSchema,
   v2VerifyRequestSchema,
   v2VerifyResponseSchema,
+  type DecodedQrInfo,
   type V2PlaceOrderResponse,
   type V2StatusResponse,
   type V2VerifyResponse,
@@ -27,7 +34,13 @@ import { z } from 'zod';
 
 import { OrderService } from '../services/order-service.js';
 import { createQuoteService, type StoredQuote } from '../services/quote-service.js';
+import {
+  stellarBuiltTxHashFromMetadata,
+  stellarMaxTimeFromMetadata,
+  stellarTransferMetadata,
+} from '../services/stellar-transfer-metadata.js';
 
+import type { ChainId } from '@gaian-stellar-integration/config';
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
 
 const v2IdParamsSchema = z.object({ id: z.string().min(1) });
@@ -38,6 +51,50 @@ const envelopeErrors = {
   404: v2ErrorEnvelopeSchema,
   409: v2ErrorEnvelopeSchema,
 } as const;
+
+/** What verify checks against and what the payout needs, from the quote or from the order rows. */
+interface VerifyContext {
+  readonly chain: ChainId;
+  readonly token: string;
+  readonly depositAddress: string;
+  readonly fromAddress: string;
+  readonly amountBaseUnits: string;
+  readonly fiatAmount: number;
+  readonly fiatCurrency: string;
+  readonly qrInfo: DecodedQrInfo;
+  readonly country: string;
+}
+
+/** Drops zeros after the decimal point: "10.50000000" -> "10.5", "10.00000000" -> "10". */
+const trimDecimal = (v: string): string => (v.includes('.') ? v.replace(/\.?0+$/, '') : v);
+
+const verifyContextFromRow = (
+  row: NonNullable<Awaited<ReturnType<OrderService['findVerifyContextByOrderIdAndTenant']>>>,
+): VerifyContext => {
+  const qr = decodedQrInfoSchema.safeParse(row.qrPayload);
+  if (!qr.success) {
+    throw new AppError('order is missing its payout recipient', {
+      category: 'INTERNAL',
+      statusCode: 500,
+      severity: 'HIGH',
+      code: 'ORDER_RECIPIENT_MISSING',
+    });
+  }
+  return {
+    chain: row.chain as ChainId,
+    token: row.token,
+    depositAddress: row.toAddress,
+    fromAddress: row.fromAddress,
+    amountBaseUnits: getChainAdapter(row.chain as ChainId).amountBaseUnits(
+      row.token,
+      trimDecimal(row.amount),
+    ),
+    fiatAmount: Number(row.fiatAmount),
+    fiatCurrency: row.fiatCurrency,
+    qrInfo: qr.data,
+    country: qr.data.country,
+  };
+};
 
 export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) => {
   const orders = new OrderService(app.db);
@@ -87,6 +144,13 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         throw new ValidationError(`This endpoint only supports Stellar orders. Got chain: ${quote.chain}`);
       }
 
+      // Pay with XLM exists only where Stellar's DEX can deliver the order's
+      // exact USDC: a Stellar USDC order. Anywhere else it is a client error.
+      const payWithXlm = body.sourceAsset === 'XLM';
+      if (payWithXlm && quote.token !== 'USDC') {
+        throw new ValidationError('sourceAsset XLM is only available for Stellar USDC orders');
+      }
+
       await requireKyc(quote);
 
       const adapter = getChainAdapter(quote.chain);
@@ -98,7 +162,13 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         toAddress: quote.depositAddress,
         amount: quote.cryptoAmount,
         memo,
+        // The order expiry becomes the Stellar tx max time: a late signature on
+        // the tx built here is rejected by the network (tx_too_late) instead of
+        // paying an order that is already closed.
+        expiresAt: quote.expiresAt,
+        ...(payWithXlm ? { sourceAsset: 'XLM' as const } : {}),
       });
+      const stellarMetadata = stellarTransferMetadata(encoded);
 
       await orders.createOrder({
         orderId: quote.orderId,
@@ -124,6 +194,7 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
           token: quote.token,
           amount: Number(quote.cryptoAmount),
         },
+        ...(stellarMetadata !== undefined ? { metadata: { ...stellarMetadata } } : {}),
       });
 
       const response: V2PlaceOrderResponse = {
@@ -139,6 +210,12 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         encodedTransaction: encoded.encodedTransaction,
         expiresAt: quote.expiresAt,
         memo,
+        ...(encoded.stellar?.pathPayment
+          ? {
+              sourceAsset: encoded.stellar.pathPayment.sourceAsset,
+              sendMax: encoded.stellar.pathPayment.sendMax,
+            }
+          : {}),
       };
       return await reply.ok(response);
     },
@@ -166,38 +243,95 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
       if (!tenant) throw new AuthenticationError('Tenant authentication required');
       const { id } = req.params as { id: string };
       const body = req.body as ReturnType<typeof v2VerifyRequestSchema.parse>;
+      // The hash goes straight into a Horizon URL path, so anything but 64 hex
+      // characters (for example `H/../H`) is refused before it can reach the network
+      // or an order row. Lower case is the one canonical form.
+      if (!/^[0-9a-fA-F]{64}$/.test(body.transactionHash)) {
+        throw new ValidationError('transactionHash must be 64 hexadecimal characters');
+      }
+      const txHash = body.transactionHash.toLowerCase();
 
       const verifyResponse = (
         statusLabel: 'verified' | 'failed' | 'pending',
         message: string,
+        reasonCode?: string,
       ): V2VerifyResponse => ({
         orderId: id,
         status: v2VerifyStatusCode(statusLabel),
         statusLabel,
-        transactionHash: body.transactionHash,
+        transactionHash: txHash,
         message,
+        ...(reasonCode !== undefined ? { reasonCode } : {}),
       });
+      // A clear, stable answer for the wallet in place of a generic failure.
+      const orderExpiredResponse = (): V2VerifyResponse =>
+        verifyResponse('failed', STELLAR_ORDER_EXPIRED, 'ORDER_EXPIRED');
 
       const order = await orders.findByOrderIdAndTenant(id, tenant.id);
       if (!order) throw new NotFoundError(`Order ${id}`);
 
+      // Peek; consume only after verification succeeds.
       const quote = await quotes.getByOrderId(id);
-      if (!quote) throw new ConflictError('quote expired or already consumed');
 
-      if (quote.chain !== CHAIN_IDS.STELLAR) {
-        throw new ValidationError(`This endpoint only supports Stellar orders. Got chain: ${quote.chain}`);
+      /**
+       * What verify checks the on-chain transfer against and what the payout needs.
+       * Taken from the cached quote while it is there, and rebuilt from Postgres when
+       * it is not. The quote key lives for QUOTE_TTL_SECONDS, which is also the order
+       * expiry, so by the time an order can be told it expired the quote is always
+       * gone. The order rows already hold every value, written when the order was
+       * placed, so nothing here is inferred.
+       */
+      const fromDb = quote ? null : await orders.findVerifyContextByOrderIdAndTenant(id, tenant.id);
+
+      if (!quote && fromDb?.status === 'expired') {
+        // Asked again, with the same tx, after verify expired the order unpaid:
+        // same answer, not a 409. Anything else keeps the 409.
+        const state = await orders.findTransferState(order.id);
+        const builtTxHash = stellarBuiltTxHashFromMetadata(state?.metadata);
+        if (
+          state !== null &&
+          !state.isConfirmed &&
+          builtTxHash?.toLowerCase() === txHash
+        ) {
+          return await reply.ok(orderExpiredResponse());
+        }
+      }
+      if (!quote && !fromDb) {
+        throw new ConflictError('quote expired or already consumed');
+      }
+      // The quote being single-use was the only thing stopping a second verify from
+      // dispatching a second payout. Without it the status takes over the job: only
+      // an order still awaiting its deposit may be verified.
+      if (fromDb && fromDb.status !== 'awaiting_deposit') {
+        throw new ConflictError(`order is no longer awaiting a deposit (status: ${fromDb.status})`);
       }
 
+      if ((quote?.chain ?? fromDb?.chain) !== CHAIN_IDS.STELLAR) {
+        throw new ValidationError(
+          `This endpoint only supports Stellar orders. Got chain: ${quote?.chain ?? fromDb?.chain ?? 'unknown'}`,
+        );
+      }
+
+      const vctx: VerifyContext = quote ?? verifyContextFromRow(fromDb as NonNullable<typeof fromDb>);
+
+      // The tx time bound and built tx hash written at order time. Read from the
+      // durable row (the quote is usually gone by the time an order has expired).
+      const transferState = await orders.findTransferState(order.id);
+      const stellarMaxTime = stellarMaxTimeFromMetadata(transferState?.metadata);
+      const stellarBuiltTxHash = stellarBuiltTxHashFromMetadata(transferState?.metadata);
+
       // Verify the transaction on Stellar Horizon.
-      const adapter = getChainAdapter(quote.chain);
+      const adapter = getChainAdapter(vctx.chain);
       const verification = await adapter.verify({
-        chain: quote.chain,
-        token: quote.token,
-        txHash: body.transactionHash,
-        expectedToAddress: quote.depositAddress,
-        expectedFromAddress: quote.fromAddress,
-        minAmountBaseUnits: quote.amountBaseUnits,
+        chain: vctx.chain,
+        token: vctx.token,
+        txHash,
+        expectedToAddress: vctx.depositAddress,
+        expectedFromAddress: vctx.fromAddress,
+        minAmountBaseUnits: vctx.amountBaseUnits,
         memo: stellarMemoFromOrderId(id),
+        ...(stellarMaxTime !== undefined ? { maxTime: stellarMaxTime } : {}),
+        ...(stellarBuiltTxHash !== undefined ? { builtTxHash: stellarBuiltTxHash } : {}),
       });
 
       if (!verification.ok) {
@@ -206,31 +340,66 @@ export const v2OrderRoutes: FastifyPluginAsync = async (app: FastifyInstance) =>
         if (verification.reason === 'tx not found') {
           return await reply.ok(verifyResponse('pending', verification.reason));
         }
-        await Promise.all([
-          quotes.consumeByOrderId(id),
-          orders.updateStatus(id, 'failed', `verify failed: ${verification.reason}`),
-        ]);
-        logger.warn({ orderId: id, txHash: body.transactionHash, reason: verification.reason }, 'v2.verify_failed');
+        // The adapter only says this for the tx built for this order, once the
+        // network can no longer accept it and the payer landed nothing with the
+        // order memo, so closing the order cannot strand a payment on its way.
+        if (verification.reason === STELLAR_ORDER_EXPIRED) {
+          // Only from awaiting_deposit: a parallel verify of a real payment may
+          // have moved the order on, and expiring it then would orphan the payout.
+          const expired = await orders.updateStatus(
+            id,
+            'expired',
+            'order expired before payment',
+            'awaiting_deposit',
+          );
+          if (!expired) {
+            throw new ConflictError('order is no longer awaiting a deposit');
+          }
+          await quotes.consumeByOrderId(id);
+          logger.warn(
+            { orderId: id, txHash },
+            'v2.verify_order_expired',
+          );
+          return await reply.ok(orderExpiredResponse());
+        }
+        // Only an order still awaiting its deposit may be failed. A wrong hash
+        // must not fail an order whose own transaction can still land, and a slow
+        // failing call must not overwrite a status a parallel verify just wrote.
+        const failed = await orders.updateStatus(
+          id,
+          'failed',
+          `verify failed: ${verification.reason}`,
+          'awaiting_deposit',
+        );
+        if (!failed) {
+          throw new ConflictError('order is no longer awaiting a deposit');
+        }
+        await quotes.consumeByOrderId(id);
+        logger.warn({ orderId: id, txHash, reason: verification.reason }, 'v2.verify_failed');
         return await reply.ok(verifyResponse('failed', verification.reason));
       }
 
-      // Consume quote and advance order status concurrently.
+      // Only an order still awaiting its deposit may move on, so a repeated or
+      // parallel verify cannot dispatch a second payout.
+      const advanced = await orders.updateStatus(id, 'processing', 'verified on-chain', 'awaiting_deposit');
+      if (!advanced) {
+        throw new ConflictError('order is no longer awaiting a deposit');
+      }
       await Promise.all([
         quotes.consumeByOrderId(id),
-        orders.setTransactionHash(id, body.transactionHash, order.id),
-        orders.updateStatus(id, 'processing', 'verified on-chain'),
+        orders.setTransactionHash(id, txHash, order.id),
       ]);
 
       // Dispatch fiat payout.
       await app.payout.dispatch({
         orderId: id,
-        fiatAmount: quote.fiatAmount.toString(),
-        fiatCurrency: quote.fiatCurrency,
+        fiatAmount: vctx.fiatAmount.toString(),
+        fiatCurrency: vctx.fiatCurrency,
         recipient: {
-          accountNumber: quote.qrInfo.accountNumber,
-          bankCode: quote.qrInfo.bankBin,
-          beneficiaryName: quote.qrInfo.beneficiaryName,
-          country: quote.country,
+          accountNumber: vctx.qrInfo.accountNumber,
+          bankCode: vctx.qrInfo.bankBin,
+          beneficiaryName: vctx.qrInfo.beneficiaryName,
+          country: vctx.country,
         },
       });
 

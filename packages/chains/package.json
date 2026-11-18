@@ -18,7 +18,7 @@
     "build": "tsc -p tsconfig.json",
     "type-check": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
-    "test": "vitest run --passWithNoTests",
+    "test": "tsc -p tsconfig.test.json && node --import tsx --test test/*.test.ts",
     "test:stellar": "npx tsx scripts/test-stellar-verify-mainnet.ts",
     "clean": "rm -rf dist .turbo *.tsbuildinfo"
   },

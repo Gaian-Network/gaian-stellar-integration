@@ -171,13 +171,60 @@ export class OrderService {
     };
   }
 
+  // What verify needs when the cached quote is gone: the deposit address, payer,
+  // amount and payout recipient, all written when the order was placed. Tenant
+  // scoped. `amount` is the USDC amount as a decimal string and `qrPayload` the
+  // decoded merchant QR, exactly as stored.
+  async findVerifyContextByOrderIdAndTenant(
+    orderId: string,
+    tenantId: number,
+  ): Promise<{
+    readonly status: string;
+    readonly chain: string;
+    readonly token: string;
+    readonly fromAddress: string;
+    readonly toAddress: string;
+    readonly amount: string;
+    readonly fiatAmount: string;
+    readonly fiatCurrency: string;
+    readonly qrPayload: unknown;
+  } | null> {
+    const rows = await this.db
+      .select({
+        status: orders.status,
+        chain: cryptoTransfers.chain,
+        token: cryptoTransfers.token,
+        fromAddress: cryptoTransfers.fromAddress,
+        toAddress: cryptoTransfers.toAddress,
+        amount: cryptoTransfers.amount,
+        fiatAmount: orders.fiatAmount,
+        fiatCurrency: orders.fiatCurrency,
+        qrPayload: orderPayment.qrPayload,
+      })
+      .from(orders)
+      .innerJoin(cryptoTransfers, eq(cryptoTransfers.orderId, orders.id))
+      .innerJoin(orderPayment, eq(orderPayment.orderId, orders.id))
+      .where(and(eq(orders.orderId, orderId), eq(orders.tenantId, tenantId)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
   async requireByOrderId(orderId: string): Promise<OrderRow> {
     const found = await this.findByOrderId(orderId);
     if (!found) throw new NotFoundError(`Order ${orderId}`);
     return found;
   }
 
-  async updateStatus(orderId: string, nextStatus: string, event = 'status updated'): Promise<void> {
+  // Returns true when this call wrote the transition. `expectedFrom` makes it a
+  // compare-and-set: write only if the order is still in that status. For a
+  // transition that is wrong from anywhere else (expiring an order a parallel
+  // verify just paid).
+  async updateStatus(
+    orderId: string,
+    nextStatus: string,
+    event = 'status updated',
+    expectedFrom?: string,
+  ): Promise<boolean> {
     let didTransition = false;
     let fromStatus: string | undefined;
     let transitionId: number | undefined;
@@ -197,10 +244,15 @@ export class OrderService {
         );
         return;
       }
-      await tx
+      if (expectedFrom !== undefined && current.current !== expectedFrom) return;
+      // Compare-and-set: only transition if the status is STILL what we read, so
+      // two concurrent writers cannot both pass the checks above.
+      const updated = await tx
         .update(orders)
         .set({ status: nextStatus, updatedAt: new Date() })
-        .where(eq(orders.id, current.id));
+        .where(and(eq(orders.id, current.id), eq(orders.status, current.current)))
+        .returning({ id: orders.id });
+      if (updated.length === 0) return;
       const history = await tx
         .insert(orderStatusHistory)
         .values({
@@ -233,7 +285,22 @@ export class OrderService {
         if (fresh) void publishOrderStatusEvent(fresh, { id: transitionId, status: nextStatus });
       }
     }
+    return didTransition;
+  }
 
+  // The order's crypto transfer: its jsonb metadata (Stellar time bound, built
+  // tx hash, path payment details) and whether a deposit was ever confirmed on
+  // it. Null when the order has no transfer row.
+  async findTransferState(
+    orderRowId: number,
+  ): Promise<{ readonly metadata: unknown; readonly isConfirmed: boolean } | null> {
+    const rows = await this.db
+      .select({ metadata: cryptoTransfers.metadata, isConfirmed: cryptoTransfers.isConfirmed })
+      .from(cryptoTransfers)
+      .where(eq(cryptoTransfers.orderId, orderRowId))
+      .limit(1);
+    const row = rows[0];
+    return row ? { metadata: row.metadata ?? null, isConfirmed: row.isConfirmed } : null;
   }
 
   async setTransactionHash(
