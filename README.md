@@ -88,7 +88,7 @@ The time bound protects only the transactions Gaian builds. A buyer can still se
 
 ## Run locally
 
-Set `DATABASE_URL` and `REDIS_URL` (in `.env` or the shell), then run `pnpm dev`. The server listens on `HOST:PORT` (default `0.0.0.0:3000`). Routes are under `/api/v2`.
+Set `DATABASE_URL` and `REDIS_URL` (in `.env` or the shell), then run `pnpm dev`. The server listens on `HOST:PORT` (default `0.0.0.0:3000`). Routes are under `/api/v2`. When `GAIAN_WEBHOOK_ENABLED=true`, `GAIAN_WEBHOOK_INTERNAL_API_KEY` must also be set (it must equal gaian-webhook's `INTERNAL_API_KEY` for the same environment), otherwise the service refuses to start.
 
 ## Tests
 
