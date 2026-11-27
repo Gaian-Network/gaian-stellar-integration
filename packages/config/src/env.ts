@@ -52,6 +52,18 @@ const fxRatesValidator = makeValidator<Record<string, number>>((input) => {
   return map;
 });
 
+// The publisher sends this key on every hand-off to gaian-webhook. Enabling the
+// webhook without it would make every event fail at the receiver, so refuse to
+// start instead of discovering that one dropped event at a time.
+export const assertWebhookKeyConfigured = (cfg: {
+  readonly GAIAN_WEBHOOK_ENABLED: boolean;
+  readonly GAIAN_WEBHOOK_INTERNAL_API_KEY: string;
+}): void => {
+  if (cfg.GAIAN_WEBHOOK_ENABLED && cfg.GAIAN_WEBHOOK_INTERNAL_API_KEY === '') {
+    throw new Error('GAIAN_WEBHOOK_INTERNAL_API_KEY must be set when GAIAN_WEBHOOK_ENABLED is true');
+  }
+};
+
 export const env = cleanEnv(process.env, {
   NODE_ENV: nodeEnvValidator({ default: 'development' }),
   ENVIRONMENT: environmentValidator({ default: 'production' }),
@@ -95,6 +107,9 @@ export const env = cleanEnv(process.env, {
   // endpoints, signs deliveries (HMAC) and retries to the tenant.
   GAIAN_WEBHOOK_ENABLED: bool({ default: false }),
   GAIAN_WEBHOOK_URL: str({ default: '' }),
+  // Sent as `x-internal-api-key`; must equal gaian-webhook's INTERNAL_API_KEY
+  // for the same environment.
+  GAIAN_WEBHOOK_INTERNAL_API_KEY: str({ default: '' }),
   GAIAN_WEBHOOK_TIMEOUT_MS: num({ default: 5_000 }),
   GAIAN_WEBHOOK_RETRY_ATTEMPTS: num({ default: 2 }),
 
@@ -107,6 +122,8 @@ export const env = cleanEnv(process.env, {
   }),
   STELLAR_USDC_CODE: str({ default: 'USDC' }),
 });
+
+assertWebhookKeyConfigured(env);
 
 export type AppEnv = typeof env;
 

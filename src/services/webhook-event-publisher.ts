@@ -81,6 +81,9 @@ export const publishOrderStatusEvent = async (
   const correlationId = getRequestId();
   const headers: Record<string, string> = {
     'X-Tenant-ID': String(order.tenantId),
+    ...(env.GAIAN_WEBHOOK_INTERNAL_API_KEY !== ''
+      ? { 'x-internal-api-key': env.GAIAN_WEBHOOK_INTERNAL_API_KEY }
+      : {}),
     ...(correlationId !== undefined ? { 'x-request-id': correlationId } : {}),
   };
   const body = buildBody(order, transition);
@@ -113,6 +116,16 @@ export const publishOrderStatusEvent = async (
         } else {
           logger.info(line, 'gaian-webhook.accepted');
         }
+        return;
+      }
+
+      if (res.status === 401) {
+        // A rejected key is a configuration mismatch, so retrying cannot help.
+        // The key itself is never logged.
+        logger.warn(
+          { orderId: order.orderId, transitionId: transition.id, httpStatus: res.status },
+          'gaian-webhook.internal_key_rejected',
+        );
         return;
       }
 
